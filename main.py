@@ -1,34 +1,83 @@
-"""Sistema de Inventario Mayorista — interfaz gráfica (Tkinter).
+"""SysMayor — Sistema de Inventario y Pedidos para distribuidoras mayoristas (interfaz Tkinter).
 
 Ejecutar:  python main.py
 Las reglas de negocio están en database.py; aquí solo hay interfaz.
 """
+import sqlite3
 import tkinter as tk
+from datetime import date, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import database as db
 
-BG = "#f8f9fa"
-COLORES_ALERTA = {"VENCIDO": "#f5c6cb", "POR VENCER": "#ffe0b2", "AGOTADO": "#d6d8db", "STOCK BAJO": "#fff3cd"}
-FUENTE = ("Arial", 10)
+# ---------------------------------------------------------------- estilo
+FONDO, BLANCO, BORDE, TEXTO, GRIS = "#f3f4f6", "#ffffff", "#e5e7eb", "#111827", "#6b7280"
+LATERAL, LATERAL_HOVER, LATERAL_ACTIVO = "#111827", "#1f2937", "#2563eb"
+COLORES = {"primario": "#2563eb", "exito": "#16a34a", "peligro": "#dc2626",
+           "aviso": "#d97706", "neutro": "#6b7280", "info": "#0891b2"}
+NIVELES = {"ok": "#16a34a", "aviso": "#d97706", "malo": "#dc2626", "info": "#2563eb"}
+ALERTAS_COLOR = {"VENCIDO": "#fecaca", "POR VENCER": "#fed7aa", "AGOTADO": "#e5e7eb", "STOCK BAJO": "#fef08a"}
+FUENTE, FUENTE_B = ("Segoe UI", 10), ("Segoe UI", 10, "bold")
+TITULO, SUBTITULO = ("Segoe UI", 19, "bold"), ("Segoe UI", 10)
+
+
+def oscurecer(color, factor=0.85):
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % (int(r * factor), int(g * factor), int(b * factor))
 
 
 def tag_de(tipo):
     return tipo.replace(" ", "_")
 
 
-def crear_tabla(padre, columnas, anchos=None, alto=12):
-    marco = tk.Frame(padre, bg=BG)
-    marco.pack(fill="both", expand=True, padx=8, pady=4)
-    tree = ttk.Treeview(marco, columns=columnas, show="headings", height=alto)
+def texto_dias(d):
+    return f"vencido hace {-d} d" if d < 0 else ("vence hoy" if d == 0 else f"faltan {d} d")
+
+
+class Boton(tk.Label):
+    """Botón plano con efecto al pasar el mouse (funciona igual en Windows, Mac y Linux)."""
+
+    def __init__(self, padre, texto, comando, color="primario", **kw):
+        base = COLORES.get(color, color)
+        super().__init__(padre, text=texto, bg=base, fg="white", font=FUENTE_B, padx=14, pady=6, cursor="hand2", **kw)
+        self._base, self._hover, self._cmd = base, oscurecer(base), comando
+        self.bind("<Enter>", lambda e: self.configure(bg=self._hover))
+        self.bind("<Leave>", lambda e: self.configure(bg=self._base))
+        self.bind("<Button-1>", lambda e: self._cmd())
+
+    def pintar(self, color):
+        self._base = COLORES.get(color, color)
+        self._hover = oscurecer(self._base)
+        self.configure(bg=self._base)
+
+
+def boton(padre, texto, comando, color="primario", lado="left"):
+    b = Boton(padre, texto, comando, color)
+    b.pack(side=lado, padx=(0, 8) if lado == "left" else (8, 0), pady=4)
+    return b
+
+
+def entrada(padre, ancho=30, mostrar=""):
+    return tk.Entry(padre, width=ancho, font=FUENTE, relief="flat", bg=BLANCO, fg=TEXTO, show=mostrar,
+                    highlightthickness=1, highlightbackground="#d1d5db", highlightcolor=COLORES["primario"],
+                    insertbackground=TEXTO)
+
+
+def crear_tabla(padre, columnas, anchos, alto=12, izq=()):
+    marco = tk.Frame(padre, bg=BLANCO, highlightthickness=1, highlightbackground=BORDE)
+    marco.pack(fill="both", expand=True, pady=(0, 8))
+    tree = ttk.Treeview(marco, columns=columnas, show="headings", height=alto, style="Tabla.Treeview")
     sb = ttk.Scrollbar(marco, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=sb.set)
-    for i, col in enumerate(columnas):
-        tree.heading(col, text=col)
-        tree.column(col, width=anchos[i] if anchos else 110, anchor="center")
+    for col, ancho in zip(columnas, anchos):
+        ancla = "w" if col in izq else "center"
+        tree.heading(col, text=col, anchor=ancla)
+        tree.column(col, width=ancho, minwidth=40, anchor=ancla)
     tree.pack(side="left", fill="both", expand=True)
     sb.pack(side="right", fill="y")
-    for tipo, color in COLORES_ALERTA.items():
+    tree.tag_configure("par", background=BLANCO)
+    tree.tag_configure("impar", background="#f9fafb")
+    for tipo, color in ALERTAS_COLOR.items():
         tree.tag_configure(tag_de(tipo), background=color)
     return tree
 
@@ -36,7 +85,8 @@ def crear_tabla(padre, columnas, anchos=None, alto=12):
 def llenar(tree, filas, tags=None):
     tree.delete(*tree.get_children())
     for i, fila in enumerate(filas):
-        tree.insert("", "end", values=fila, tags=(tags[i],) if tags and tags[i] else ())
+        tag = (tags[i] if tags and tags[i] else ("par" if i % 2 == 0 else "impar"))
+        tree.insert("", "end", values=fila, tags=(tag,))
 
 
 def seleccionado(tree, mensaje="Selecciona una fila de la tabla."):
@@ -47,11 +97,17 @@ def seleccionado(tree, mensaje="Selecciona una fila de la tabla."):
     return int(tree.item(sel[0])["values"][0])
 
 
-def boton(padre, texto, comando, color="#007bff", lado="left"):
-    b = tk.Button(padre, text=texto, command=comando, bg=color, fg="white" if color != "#ffc107" else "black",
-                  font=("Arial", 9, "bold"), padx=8, pady=2)
-    b.pack(side=lado, padx=5, pady=4)
-    return b
+def tarjetas(padre, datos, por_fila=3):
+    marco = tk.Frame(padre, bg=FONDO)
+    marco.pack(fill="x", pady=(0, 8))
+    for i, d in enumerate(datos):
+        fila, col = divmod(i, por_fila)
+        card = tk.Frame(marco, bg=BLANCO, highlightthickness=1, highlightbackground=BORDE, padx=16, pady=10)
+        card.grid(row=fila, column=col, sticky="nsew", padx=(0 if col == 0 else 8, 0), pady=4)
+        marco.grid_columnconfigure(col, weight=1, uniform="k")
+        tk.Label(card, text=d["titulo"], bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        tk.Label(card, text=d["valor"], bg=BLANCO, fg=NIVELES.get(d.get("nivel", "info"), TEXTO),
+                 font=("Segoe UI", 17, "bold"), anchor="w").pack(fill="x")
 
 
 class Formulario(tk.Toplevel):
@@ -61,24 +117,27 @@ class Formulario(tk.Toplevel):
     def __init__(self, padre, titulo, campos, al_guardar, texto_boton="Guardar"):
         super().__init__(padre)
         self.title(titulo)
-        self.configure(bg=BG)
+        self.configure(bg=BLANCO, padx=24, pady=18)
         self.resizable(False, False)
         self.transient(padre)
         self.grab_set()
+        tk.Label(self, text=titulo, font=("Segoe UI", 14, "bold"), bg=BLANCO, fg=TEXTO).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         self.widgets = {}
-        for i, (clave, etiqueta, inicial, opcion) in enumerate(campos):
-            tk.Label(self, text=etiqueta, bg=BG, anchor="w", font=FUENTE).grid(row=i, column=0, sticky="w", padx=10, pady=4)
+        for i, (clave, etiqueta, inicial, opcion) in enumerate(campos, start=1):
+            tk.Label(self, text=etiqueta, bg=BLANCO, fg=GRIS, font=FUENTE, anchor="w").grid(
+                row=i, column=0, sticky="w", padx=(0, 14), pady=5)
             if isinstance(opcion, (list, tuple)):
                 w = ttk.Combobox(self, values=opcion, state="readonly", width=28)
                 w.set(inicial)
             else:
-                w = tk.Entry(self, width=31, show="*" if opcion == "*" else "")
+                w = entrada(self, 31, "*" if opcion == "*" else "")
                 w.insert(0, inicial)
-            w.grid(row=i, column=1, padx=10, pady=4)
+            w.grid(row=i, column=1, pady=5)
             self.widgets[clave] = w
         self.al_guardar = al_guardar
-        tk.Button(self, text=texto_boton, command=self.guardar, bg="#28a745", fg="white",
-                  font=("Arial", 10, "bold")).grid(row=len(campos), column=0, columnspan=2, pady=12)
+        Boton(self, texto_boton, self.guardar, "exito").grid(row=len(campos) + 1, column=0, columnspan=2,
+                                                              sticky="e", pady=(14, 0))
 
     def guardar(self):
         valores = {k: w.get().strip() for k, w in self.widgets.items()}
@@ -90,24 +149,64 @@ class Formulario(tk.Toplevel):
         self.destroy()
 
 
+# ------------------------------------------------------------ aplicación
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("Sistema de Inventario Mayorista")
-        root.geometry("1120x700")
-        root.minsize(1000, 620)
+        root.title("SysMayor — Inventario y pedidos para distribuidoras mayoristas")
+        root.geometry("1240x720")
+        root.minsize(1100, 660)
+        self.configurar_estilos()
         db.init_db()
-        self.usuario = None
-        self.carrito = []
+        try:
+            db.respaldar()
+        except Exception:
+            pass
+        root.protocol("WM_DELETE_WINDOW", self.cerrar)
+        root.report_callback_exception = self.error_inesperado
+        self.usuario, self.carrito, self.items, self.vistas, self.activo = None, [], {}, {}, None
         self.mostrar_login()
 
-    # ------------------------------------------------------------------ util
-    def limpiar_root(self):
+    def configurar_estilos(self):
+        s = ttk.Style()
+        try:
+            s.theme_use("clam")
+        except tk.TclError:
+            pass
+        s.configure("Tabla.Treeview", background=BLANCO, fieldbackground=BLANCO, foreground=TEXTO,
+                    rowheight=28, borderwidth=0, font=FUENTE)
+        s.configure("Tabla.Treeview.Heading", background="#1f2937", foreground="white", font=FUENTE_B,
+                    relief="flat", padding=(6, 7))
+        s.map("Tabla.Treeview", background=[("selected", "#bfdbfe")], foreground=[("selected", TEXTO)])
+        s.map("Tabla.Treeview.Heading", background=[("active", "#374151")])
+        s.configure("TNotebook", background=FONDO, borderwidth=0)
+        s.configure("TNotebook.Tab", padding=(16, 8), font=FUENTE_B, background="#e5e7eb")
+        s.map("TNotebook.Tab", background=[("selected", BLANCO)])
+
+    def error_inesperado(self, tipo, valor, _traza):
+        """Muestra un mensaje entendible cuando la base está ocupada o tiene datos mal escritos a mano."""
+        if issubclass(tipo, sqlite3.OperationalError) and "locked" in str(valor):
+            messagebox.showwarning("Base de datos en uso",
+                                   "Otro programa (DBeaver, DB Browser) tiene cambios sin guardar en la base.\n\n"
+                                   "Guarda los cambios (Commit / Write Changes) o cierra esa conexión y vuelve a intentarlo.")
+        else:
+            messagebox.showerror("Algo salió mal",
+                                 f"{tipo.__name__}: {valor}\n\nSi acabas de editar la base de datos a mano, revisa que "
+                                 "las fechas sean AAAA-MM-DD y que cantidades y precios sean solo números.")
+
+    def cerrar(self):
+        try:
+            db.respaldar()
+        except Exception:
+            pass
+        self.root.destroy()
+
+    def limpiar(self):
         for w in self.root.winfo_children():
             w.destroy()
 
     def ejecutar(self, accion, despues=None, exito=None):
-        """Ejecuta una acción de db mostrando los errores de negocio. Devuelve (ok, resultado)."""
+        """Ejecuta una acción mostrando los errores de negocio. Devuelve (ok, resultado)."""
         try:
             res = accion()
         except db.ErrorNegocio as e:
@@ -117,13 +216,15 @@ class App:
             messagebox.showinfo("Listo", exito)
         if despues:
             despues()
-        self.actualizar_alertas()
+        self.actualizar_insignias()
         return True, res
 
-    def nueva_vista(self, titulo):
+    def nueva_vista(self, titulo, subtitulo=""):
         for w in self.contenido.winfo_children():
             w.destroy()
-        tk.Label(self.contenido, text=titulo, font=("Arial", 13, "bold"), bg=BG).pack(pady=(8, 4))
+        tk.Label(self.contenido, text=titulo, font=TITULO, bg=FONDO, fg=TEXTO, anchor="w").pack(fill="x")
+        tk.Label(self.contenido, text=subtitulo, font=SUBTITULO, bg=FONDO, fg=GRIS, anchor="w").pack(
+            fill="x", pady=(0, 12))
         return self.contenido
 
     def exportar(self, nombre, columnas, filas):
@@ -135,20 +236,29 @@ class App:
 
     # ----------------------------------------------------------------- login
     def mostrar_login(self):
-        self.limpiar_root()
-        self.usuario = None
-        self.carrito = []
-        self.root.config(bg="#f0f2f5")
-        f = tk.Frame(self.root, bg="#f0f2f5")
-        f.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(f, text="SISTEMA DE INVENTARIO MAYORISTA", font=("Arial", 16, "bold"), bg="#f0f2f5").grid(columnspan=2, pady=(0, 4))
-        tk.Label(f, text="Soledad y Barranquilla", font=("Arial", 10), fg="gray", bg="#f0f2f5").grid(columnspan=2, pady=(0, 18))
-        tk.Label(f, text="Usuario:", bg="#f0f2f5", font=("Arial", 11)).grid(row=2, column=0, sticky="w", pady=5)
-        e_user = tk.Entry(f, font=("Arial", 11), width=22)
-        e_user.grid(row=2, column=1, pady=5)
-        tk.Label(f, text="Contraseña:", bg="#f0f2f5", font=("Arial", 11)).grid(row=3, column=0, sticky="w", pady=5)
-        e_clave = tk.Entry(f, font=("Arial", 11), width=22, show="*")
-        e_clave.grid(row=3, column=1, pady=5)
+        self.limpiar()
+        self.usuario, self.carrito = None, []
+        izq = tk.Frame(self.root, bg=LATERAL, width=460)
+        izq.pack(side="left", fill="y")
+        izq.pack_propagate(False)
+        tk.Label(izq, text="📦", font=("Segoe UI Emoji", 54), bg=LATERAL, fg="white").pack(pady=(170, 0))
+        tk.Label(izq, text="SysMayor", font=("Segoe UI", 30, "bold"), bg=LATERAL, fg="white").pack()
+        tk.Label(izq, text="Inventario y pedidos para\ndistribuidoras mayoristas", font=("Segoe UI", 12),
+                 bg=LATERAL, fg="#9ca3af", justify="center").pack(pady=(6, 0))
+        tk.Label(izq, text="Soledad · Barranquilla", font=("Segoe UI", 10), bg=LATERAL, fg="#6b7280").pack(pady=(26, 0))
+
+        der = tk.Frame(self.root, bg=BLANCO)
+        der.pack(side="left", fill="both", expand=True)
+        form = tk.Frame(der, bg=BLANCO)
+        form.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(form, text="Bienvenido", font=("Segoe UI", 22, "bold"), bg=BLANCO, fg=TEXTO).pack(anchor="w")
+        tk.Label(form, text="Inicia sesión para continuar", font=FUENTE, bg=BLANCO, fg=GRIS).pack(anchor="w", pady=(0, 22))
+        tk.Label(form, text="Usuario", font=FUENTE_B, bg=BLANCO, fg=TEXTO).pack(anchor="w")
+        e_user = entrada(form, 34)
+        e_user.pack(fill="x", ipady=6, pady=(4, 14))
+        tk.Label(form, text="Contraseña", font=FUENTE_B, bg=BLANCO, fg=TEXTO).pack(anchor="w")
+        e_clave = entrada(form, 34, "*")
+        e_clave.pack(fill="x", ipady=6, pady=(4, 20))
 
         def entrar(_=None):
             if not e_user.get().strip() or not e_clave.get():
@@ -161,99 +271,146 @@ class App:
                 return
             self.mostrar_principal(u)
 
-        tk.Button(f, text="Entrar", command=entrar, bg="#007bff", fg="white", font=("Arial", 11, "bold"),
-                  width=18).grid(row=4, columnspan=2, pady=18)
+        Boton(form, "Iniciar sesión", entrar, "primario").pack(fill="x")
         e_user.bind("<Return>", entrar)
         e_clave.bind("<Return>", entrar)
         e_user.focus()
 
     # ------------------------------------------------------------- principal
+    def opciones_menu(self):
+        """Lista de ('seccion', título) y (clave, texto, función) según el rol."""
+        rol = self.usuario["rol"]
+        inicio = ("inicio", "🏠  Inicio", self.vista_inicio)
+        mayorista = [("inventario", "📦  Inventario", self.vista_inventario),
+                     ("registro", "➕  Registrar producto", self.vista_registro),
+                     ("recibidos", "📋  Pedidos recibidos", lambda: self.vista_pedidos("recibidos")),
+                     ("alertas", "⚠️  Alertas", lambda: self.vista_alertas("mayorista")),
+                     ("reportes", "📊  Reportes", self.vista_reportes),
+                     ("ganancias", "💰  Ganancias", lambda: self.vista_ganancias("mayorista"))]
+        pedir = ("pedir", "🛒  Pedir al mayorista", self.vista_pedir_mayorista)
+        tienda = [("mi_inv", "🏪  Mi inventario", self.vista_mi_inventario),
+                  ("ventas", "🛍️  Ventas a compradores", lambda: self.vista_pedidos("ventas")),
+                  ("alertas_t", "⚠️  Alertas de mi tienda", lambda: self.vista_alertas("tienda")),
+                  ("ganancias_t", "💰  Mis ganancias", lambda: self.vista_ganancias("tienda"))]
+        comprar = ("comprar", "🛒  Comprar en una tienda", self.vista_comprar_tienda)
+        mis = ("mis_pedidos", "🧾  Mis pedidos", lambda: self.vista_pedidos("compras"))
+        if rol == "Vendedor":
+            return [inicio] + mayorista
+        if rol == "Tendero":
+            return [inicio, pedir, mis] + tienda
+        if rol == "Comprador":
+            return [inicio, comprar, mis]
+        return ([inicio, ("sec", "MAYORISTA")] + mayorista + [("sec", "MI TIENDA (TENDERO)"), pedir] + tienda +
+                [("sec", "COMPRAS (COMPRADOR)"), comprar, mis, ("sec", "SISTEMA"),
+                 ("admin", "👥  Administración", self.vista_admin)])
+
     def mostrar_principal(self, usuario):
-        self.limpiar_root()
-        self.usuario = usuario
-        self.carrito = []
-        self.root.config(bg=BG)
-        self.es_mayorista = usuario["rol"] in db.ROLES_MAYORISTA
-        self.btn_alertas = None
+        self.limpiar()
+        self.usuario, self.carrito, self.items, self.vistas = usuario, [], {}, {}
+        opciones = self.opciones_menu()
+        pady = 3 if len(opciones) > 12 else 6
 
-        cab = tk.Frame(self.root, bg="#343a40", pady=8)
-        cab.pack(fill="x")
-        tk.Label(cab, text=f"{usuario['usuario']} [{usuario['rol']}]  |  {usuario['tienda']} — {usuario['direccion']}",
-                 font=("Arial", 10, "bold"), bg="#343a40", fg="white").pack(side="left", padx=12)
-        tk.Button(cab, text="Cerrar sesión", command=self.mostrar_login, bg="#dc3545", fg="white",
-                  font=("Arial", 9, "bold")).pack(side="right", padx=12)
-
-        menu = tk.Frame(self.root, bg="#e9ecef", pady=4)
+        lat = tk.Frame(self.root, bg=LATERAL, width=250)
+        lat.pack(side="left", fill="y")
+        lat.pack_propagate(False)
+        tk.Label(lat, text="📦 SysMayor", font=("Segoe UI", 16, "bold"), bg=LATERAL, fg="white").pack(anchor="w", padx=20, pady=(18, 2))
+        tk.Label(lat, text=f"{usuario['usuario']} · {usuario['rol']}", font=("Segoe UI", 9), bg=LATERAL, fg="#9ca3af").pack(anchor="w", padx=20)
+        tk.Label(lat, text=usuario["tienda"], font=("Segoe UI", 9), bg=LATERAL, fg="#6b7280").pack(anchor="w", padx=20, pady=(0, 10))
+        menu = tk.Frame(lat, bg=LATERAL)
         menu.pack(fill="x")
-        self.contenido = tk.Frame(self.root, bg=BG)
-        self.contenido.pack(fill="both", expand=True, padx=8, pady=6)
+        for op in opciones:
+            if op[0] == "sec":
+                tk.Label(menu, text=op[1], font=("Segoe UI", 8, "bold"), bg=LATERAL, fg="#6b7280", anchor="w").pack(
+                    fill="x", padx=20, pady=(10, 2))
+                continue
+            clave, texto, fn = op
+            lbl = tk.Label(menu, text=texto, bg=LATERAL, fg="#d1d5db", font=FUENTE, anchor="w", padx=20, pady=pady, cursor="hand2")
+            lbl.pack(fill="x")
+            lbl.bind("<Enter>", lambda e, w=lbl, k=clave: w.configure(bg=LATERAL_ACTIVO if self.activo == k else LATERAL_HOVER))
+            lbl.bind("<Leave>", lambda e, w=lbl, k=clave: w.configure(bg=LATERAL_ACTIVO if self.activo == k else LATERAL))
+            lbl.bind("<Button-1>", lambda e, k=clave: self.ir(k))
+            self.items[clave], self.vistas[clave] = (lbl, texto), fn
+        salir = tk.Label(lat, text="⏻  Cerrar sesión", bg=LATERAL, fg="#fca5a5", font=FUENTE_B, anchor="w",
+                         padx=20, pady=10, cursor="hand2")
+        salir.pack(side="bottom", fill="x")
+        salir.bind("<Button-1>", lambda e: self.mostrar_login())
+        salir.bind("<Enter>", lambda e: salir.configure(bg=LATERAL_HOVER))
+        salir.bind("<Leave>", lambda e: salir.configure(bg=LATERAL))
 
-        if self.es_mayorista:
-            opciones = [("📦 Inventario", self.vista_inventario, "#6c757d"),
-                        ("➕ Registrar producto", self.vista_registro, "#28a745"),
-                        ("📋 Pedidos", lambda: self.vista_pedidos(False), "#ffc107"),
-                        ("🗂️ Historial", lambda: self.vista_pedidos(True), "#17a2b8"),
-                        ("⚠️ Alertas", self.vista_alertas, "#dc3545"),
-                        ("📊 Reportes", self.vista_reportes, "#6f42c1")]
-            if usuario["rol"] == "Administrador":
-                # El administrador ve TODAS las pestañas (también las de tendero) para poder probar el sistema
-                opciones.insert(2, ("🛒 Hacer pedido", self.vista_catalogo, "#007bff"))
-                opciones.append(("📦 Mi inventario", self.vista_mi_inventario, "#6c757d"))
-                opciones.append(("👥 Administración", self.vista_admin, "#343a40"))
+        self.contenido = tk.Frame(self.root, bg=FONDO, padx=26, pady=20)
+        self.contenido.pack(side="left", fill="both", expand=True)
+        self.actualizar_insignias()
+        self.ir("inicio")
+
+    def ir(self, clave):
+        self.activo = clave
+        for k, (lbl, _) in self.items.items():
+            lbl.configure(bg=LATERAL_ACTIVO if k == clave else LATERAL, fg="white" if k == clave else "#d1d5db")
+        self.vistas[clave]()
+
+    def actualizar_insignias(self):
+        """Muestra entre paréntesis cuántas alertas o pedidos pendientes hay en cada opción del menú."""
+        u, datos = self.usuario, {}
+        try:
+            if "alertas" in self.items:
+                datos["alertas"] = sum(db.resumen_alertas().values())
+            if "alertas_t" in self.items:
+                datos["alertas_t"] = len(db.alertas_tienda(u))
+            if "recibidos" in self.items:
+                datos["recibidos"] = len(db.listar_pedidos(u, ["PENDIENTE"]))
+            if "ventas" in self.items:
+                datos["ventas"] = len(db.listar_pedidos(u, ["PENDIENTE"], "ventas"))
+        except Exception:
+            return
+        for clave, n in datos.items():
+            lbl, base = self.items[clave]
+            lbl.configure(text=f"{base}   ({n})" if n else base)
+
+    # ---------------------------------------------------------------- inicio
+    def vista_inicio(self):
+        u = self.usuario
+        c = self.nueva_vista(f"Hola, {u['usuario']} 👋", f"{u['rol']} · {u['tienda']} — {u['direccion']}")
+        tarjetas(c, db.panel(u))
+        if u["rol"] in db.ROLES_MAYORISTA:
+            lista = db.alertas()
+        elif u["rol"] == "Tendero":
+            lista = db.alertas_tienda(u)
         else:
-            opciones = [("🛒 Hacer pedido", self.vista_catalogo, "#007bff"),
-                        ("📋 Mis pedidos", lambda: self.vista_pedidos(False), "#ffc107"),
-                        ("🗂️ Historial", lambda: self.vista_pedidos(True), "#17a2b8"),
-                        ("📦 Mi inventario", self.vista_mi_inventario, "#6c757d")]
-        por_fila = 5 if len(opciones) > 6 else len(opciones)   # el menú del admin ocupa dos filas
-        for ini in range(0, len(opciones), por_fila):
-            fila = tk.Frame(menu, bg="#e9ecef")
-            fila.pack(fill="x")
-            for texto, cmd, color in opciones[ini:ini + por_fila]:
-                b = boton(fila, texto, cmd, color)
-                if "Alertas" in texto:
-                    self.btn_alertas = b
+            tk.Label(c, text="Entra a «Comprar en una tienda» para ver qué productos tiene cada tendero.",
+                     font=FUENTE, bg=FONDO, fg=GRIS).pack(anchor="w", pady=10)
+            return
+        if not lista:
+            tk.Label(c, text="✅ Todo en orden: no hay alertas de inventario.", font=FUENTE_B, bg=FONDO,
+                     fg=COLORES["exito"]).pack(anchor="w", pady=10)
+            return
+        tk.Label(c, text=f"⚠️ Atención requerida ({len(lista)})", font=("Segoe UI", 12, "bold"), bg=FONDO,
+                 fg=TEXTO).pack(anchor="w", pady=(6, 4))
+        tree = crear_tabla(c, ("Alerta", "Producto", "Lote", "Stock", "Vence", "Días"), (120, 270, 100, 70, 110, 160), 7,
+                           izq=("Producto",))
+        llenar(tree, [(a["tipo"], a["nombre"], a["lote"], a["cantidad"], a["vencimiento"], texto_dias(a["dias"]))
+                      for a in lista[:12]], [tag_de(a["tipo"]) for a in lista[:12]])
 
-        self.actualizar_alertas()
-        (self.vista_inventario if self.es_mayorista else self.vista_catalogo)()
-        if self.es_mayorista:
-            self.aviso_inicial()
-
-    def actualizar_alertas(self):
-        if self.btn_alertas is not None and self.btn_alertas.winfo_exists():
-            total = sum(db.resumen_alertas().values())
-            self.btn_alertas.config(text=f"⚠️ Alertas ({total})")
-
-    def aviso_inicial(self):
-        r = db.resumen_alertas()
-        if sum(r.values()):
-            dias = db.get_config("dias_alerta_vencimiento", 15)
-            messagebox.showwarning(
-                "Alertas de inventario",
-                f"Vencidos con existencias: {r['VENCIDO']}\n"
-                f"Por vencer (próximos {dias} días): {r['POR VENCER']}\n"
-                f"Agotados: {r['AGOTADO']}\n"
-                f"Con stock bajo: {r['STOCK BAJO']}\n\nRevisa la pestaña «Alertas».")
-
-    # ------------------------------------------------- mayorista: inventario
+    # ----------------------------------------------- mayorista: inventario
     def vista_inventario(self):
-        c = self.nueva_vista("📦 Inventario del mayorista")
-        barra = tk.Frame(c, bg=BG)
-        barra.pack(fill="x", padx=8)
-        tk.Label(barra, text="🔍 Buscar producto o lote:", bg=BG, font=FUENTE).pack(side="left")
+        c = self.nueva_vista("📦 Inventario del mayorista", "Productos en bodega por lote, con costo, precios y vencimiento")
+        barra = tk.Frame(c, bg=FONDO)
+        barra.pack(fill="x", pady=(0, 8))
+        tk.Label(barra, text="Buscar:", bg=FONDO, font=FUENTE_B).pack(side="left")
         buscar = tk.StringVar()
-        tk.Entry(barra, textvariable=buscar, width=30).pack(side="left", padx=6)
-        cols = ("ID", "Producto", "Lote", "Stock", "Mínimo", "P. mayorista", "P. sugerido", "Vence", "Estado")
-        tree = crear_tabla(c, cols, (45, 190, 80, 65, 65, 100, 100, 95, 160), 15)
-        dias_alerta = int(db.get_config("dias_alerta_vencimiento", 15))
+        e = entrada(barra, 34)
+        e.configure(textvariable=buscar)
+        e.pack(side="left", padx=8, ipady=3)
+        cols = ("ID", "Producto", "Lote", "Stock", "Mínimo", "Costo", "P. mayorista", "P. sugerido", "Vence", "Estado")
+        tree = crear_tabla(c, cols, (45, 200, 80, 60, 65, 85, 100, 100, 95, 150), 14, izq=("Producto",))
+        dias_alerta = int(db.get_config("dias_alerta_vencimiento", 7))
 
         def cargar(*_):
             filas, tags = [], []
             for p in db.listar_productos(buscar.get().strip()):
                 est, _d = db.estados_producto(p, dias_alerta)
                 filas.append((p["id"], p["nombre"], p["lote"], p["cantidad"], p["stock_minimo"],
-                              db.dinero(p["precio_mayorista"]), db.dinero(p["precio_sugerido"]),
-                              p["fecha_vencimiento"], ", ".join(est) or "OK"))
+                              db.dinero(p["precio_costo"]), db.dinero(p["precio_mayorista"]),
+                              db.dinero(p["precio_sugerido"]), p["fecha_vencimiento"], ", ".join(est) or "OK"))
                 tags.append(tag_de(est[0]) if est else None)
             llenar(tree, filas, tags)
 
@@ -263,11 +420,9 @@ class App:
             pid = seleccionado(tree)
             if pid is None:
                 return
-            n = simpledialog.askinteger("Reponer stock", "Unidades que ingresan a bodega:",
-                                        parent=self.root, minvalue=1)
+            n = simpledialog.askinteger("Reponer stock", "Unidades que ingresan a bodega:", parent=self.root, minvalue=1)
             if n:
-                self.ejecutar(lambda: db.reponer_stock(pid, n, self.usuario["usuario"]), cargar,
-                              "Stock actualizado.")
+                self.ejecutar(lambda: db.reponer_stock(pid, n, self.usuario["usuario"]), cargar, "Stock actualizado.")
 
         def editar():
             pid = seleccionado(tree)
@@ -276,112 +431,296 @@ class App:
             p = db.obtener_producto(pid)
 
             def guardar(v):
-                db.editar_producto(pid, v["min"], v["pm"], v["ps"], v["venc"], self.usuario["usuario"])
+                db.editar_producto(pid, v["min"], v["costo"], v["pm"], v["ps"], v["venc"], self.usuario["usuario"])
                 cargar()
-                self.actualizar_alertas()
+                self.actualizar_insignias()
 
             Formulario(self.root, f"Editar: {p['nombre']} (lote {p['lote']})", [
                 ("min", "Stock mínimo:", p["stock_minimo"], None),
+                ("costo", "Costo de compra ($):", int(p["precio_costo"]), None),
                 ("pm", "Precio mayorista ($):", int(p["precio_mayorista"]), None),
                 ("ps", "Precio sugerido ($):", int(p["precio_sugerido"]), None),
                 ("venc", "Vencimiento (AAAA-MM-DD):", p["fecha_vencimiento"], None)], guardar)
 
-        def baja():
+        def retirar():
             pid = seleccionado(tree)
             if pid is None:
                 return
-            if messagebox.askyesno("Confirmar", "¿Dar de baja este producto del catálogo?\n"
-                                   "Se conserva su historial de movimientos."):
-                self.ejecutar(lambda: db.dar_de_baja(pid, self.usuario["usuario"]), cargar)
+            p = db.obtener_producto(pid)
+            if not messagebox.askyesno("Retirar lote vencido",
+                                       f"Se retirará «{p['nombre']}» (lote {p['lote']}) del inventario y se registrará "
+                                       f"una pérdida de {db.dinero(p['cantidad'] * p['precio_costo'])} "
+                                       f"({p['cantidad']} unidades a costo).\n\n¿Continuar?"):
+                return
+            ok, perdida = self.ejecutar(lambda: db.retirar_vencido(pid, self.usuario["usuario"]), cargar)
+            if ok:
+                messagebox.showinfo("Pérdida registrada", f"Pérdida por vencimiento: {db.dinero(perdida)}.")
 
-        acc = tk.Frame(c, bg=BG)
+        def eliminar():
+            pid = seleccionado(tree)
+            if pid is None:
+                return
+            if messagebox.askyesno("Eliminar producto",
+                                   "Se borrará el producto de la base de datos (no se registra como pérdida).\n"
+                                   "El historial de pedidos y movimientos se conserva.\n\n¿Eliminar definitivamente?"):
+                self.ejecutar(lambda: db.eliminar_producto(pid, self.usuario["usuario"]), cargar)
+
+        acc = tk.Frame(c, bg=FONDO)
         acc.pack(fill="x")
-        boton(acc, "➕ Reponer stock", reponer, "#28a745")
-        boton(acc, "✏️ Editar", editar, "#007bff")
-        boton(acc, "🗑️ Dar de baja", baja, "#dc3545", "right")
+        boton(acc, "➕ Reponer stock", reponer, "exito")
+        boton(acc, "✏️ Editar", editar, "primario")
+        boton(acc, "⏳ Retirar vencido (pérdida)", retirar, "aviso")
+        boton(acc, "🗑️ Eliminar", eliminar, "peligro", "right")
         cargar()
 
     def vista_registro(self):
-        c = self.nueva_vista("➕ Registrar nuevo producto / lote")
-        f = tk.Frame(c, bg=BG)
-        f.pack(pady=10)
-        campos = [("nombre", "Nombre del producto:", ""), ("lote", "Número de lote:", ""),
-                  ("cant", "Cantidad que ingresa:", ""),
-                  ("min", "Stock mínimo (alerta):", db.get_config("stock_minimo_defecto", 10)),
-                  ("pm", "Precio mayorista ($):", ""), ("ps", "Precio sugerido al público ($):", ""),
-                  ("venc", "Vencimiento (AAAA-MM-DD):", "")]
+        c = self.nueva_vista("➕ Registrar producto", "Ingresa un nuevo lote a la bodega del mayorista")
+        card = tk.Frame(c, bg=BLANCO, highlightthickness=1, highlightbackground=BORDE, padx=26, pady=20)
+        card.pack(anchor="w")
+        campos = [("nombre", "Nombre del producto", ""), ("lote", "Número de lote", ""),
+                  ("cant", "Cantidad que ingresa", ""), ("min", "Stock mínimo (alerta)", db.get_config("stock_minimo_defecto", 10)),
+                  ("costo", "Costo de compra al proveedor ($)", ""), ("pm", "Precio mayorista ($)", ""),
+                  ("ps", "Precio sugerido al público ($)", ""), ("venc", "Vencimiento (AAAA-MM-DD)", "")]
         ents = {}
         for i, (k, etiqueta, inicial) in enumerate(campos):
-            tk.Label(f, text=etiqueta, bg=BG, font=FUENTE).grid(row=i, column=0, sticky="w", pady=5, padx=6)
-            e = tk.Entry(f, width=30)
+            fila, col = divmod(i, 2)
+            px = (0, 0) if col == 0 else (28, 0)
+            tk.Label(card, text=etiqueta, bg=BLANCO, fg=GRIS, font=("Segoe UI", 9), anchor="w").grid(
+                row=fila * 2, column=col, sticky="w", padx=px, pady=(10, 2))
+            e = entrada(card, 32)
             e.insert(0, inicial)
-            e.grid(row=i, column=1, pady=5)
+            e.grid(row=fila * 2 + 1, column=col, sticky="w", padx=px, ipady=4)
             ents[k] = e
 
         def guardar():
             v = {k: e.get() for k, e in ents.items()}
             ok, _ = self.ejecutar(lambda: db.registrar_producto(
-                v["nombre"], v["lote"], v["cant"], v["min"], v["pm"], v["ps"], v["venc"],
+                v["nombre"], v["lote"], v["cant"], v["min"], v["costo"], v["pm"], v["ps"], v["venc"],
                 self.usuario["usuario"]), exito="Producto registrado en el inventario.")
             if ok:
-                for k in ("nombre", "lote", "cant", "pm", "ps", "venc"):
+                for k in ("nombre", "lote", "cant", "costo", "pm", "ps", "venc"):
                     ents[k].delete(0, tk.END)
 
-        boton(c, "💾 Guardar en inventario", guardar, "#28a745", "top")
+        tk.Label(c, text="Ganancia del mayorista por unidad = precio mayorista − costo de compra.",
+                 font=("Segoe UI", 9), bg=FONDO, fg=GRIS).pack(anchor="w", pady=(10, 6))
+        Boton(c, "💾 Guardar en inventario", guardar, "exito").pack(anchor="w")
 
-    # ----------------------------------------------- minorista: hacer pedido
-    def vista_catalogo(self):
+    # --------------------------------------------------------------- pedidos
+    def vista_pedidos(self, modo):
         u = self.usuario
-        c = self.nueva_vista(f"🛒 Hacer pedido — {u['tienda']}   (entrega en: {u['direccion']})")
-        cols = ("ID", "Producto", "Lote", "Disponible", "P. mayorista", "P. sugerido", "Vence")
-        cat = crear_tabla(c, cols, (45, 210, 90, 90, 110, 110, 100), 7)
-        llenar(cat, [(p["id"], p["nombre"], p["lote"], p["cantidad"], db.dinero(p["precio_mayorista"]),
-                      db.dinero(p["precio_sugerido"]), p["fecha_vencimiento"])
-                     for p in db.listar_productos(solo_disponibles=True)])
+        admin = u["rol"] == "Administrador"
+        info = {"recibidos": ("📋 Pedidos recibidos", "Pedidos de los tenderos al mayorista" +
+                              (" y compras en tiendas (vista de administrador)" if admin else "")),
+                "compras": ("🧾 Mis pedidos", "Lo que has pedido al mayorista o comprado en tiendas"),
+                "ventas": ("🛍️ Ventas a compradores", "Pedidos que los compradores le hacen a tu tienda")}
+        c = self.nueva_vista(*info[modo])
+        como = {"recibidos": None, "compras": "compras", "ventas": "ventas"}[modo]
+        vista = {"historial": False}
 
-        fila = tk.Frame(c, bg=BG)
-        fila.pack(fill="x", padx=8)
-        tk.Label(fila, text="Cantidad:", bg=BG, font=FUENTE).pack(side="left")
-        e_cant = tk.Entry(fila, width=8)
-        e_cant.pack(side="left", padx=6)
-        tk.Label(fila, text="Tu precio de venta al público ($):", bg=BG, font=FUENTE).pack(side="left", padx=(10, 0))
-        e_pub = tk.Entry(fila, width=10)
-        e_pub.pack(side="left", padx=6)
+        barra = tk.Frame(c, bg=FONDO)
+        barra.pack(fill="x", pady=(0, 8))
+        b1 = Boton(barra, "En curso", lambda: poner(False), "primario")
+        b1.pack(side="left", padx=(0, 4))
+        b2 = Boton(barra, "Historial", lambda: poner(True), "neutro")
+        b2.pack(side="left")
 
-        def al_elegir(_=None):
+        cols = ("ID", "Fecha", "Comprador", "Entrega en", "Vendedor", "Productos", "Total", "Estado")
+        tree = crear_tabla(c, cols, (45, 125, 95, 170, 130, 250, 85, 100), 11, izq=("Entrega en", "Vendedor", "Productos"))
+
+        def cargar():
+            estados = db.ESTADOS_FINALES if vista["historial"] else db.ESTADOS_ACTIVOS
+            llenar(tree, [(p["id"], p["fecha_creacion"][:16], p["usuario"], p["direccion"], p["vendedor"],
+                           p["resumen"], db.dinero(p["total"]), p["estado"])
+                          for p in db.listar_pedidos(u, estados, como)])
+
+        def poner(historial):
+            vista["historial"] = historial
+            b1.pintar("neutro" if historial else "primario")
+            b2.pintar("primario" if historial else "neutro")
+            if historial:
+                cambios.pack_forget()
+            else:
+                cambios.pack(side="left")
+            cargar()
+
+        def cambiar(nuevo, verbo):
+            pid = seleccionado(tree, "Selecciona un pedido de la tabla.")
+            if pid is None:
+                return
+            detalle = ""
+            if nuevo == "RECHAZADO":
+                detalle = simpledialog.askstring("Rechazar pedido", "Motivo (opcional):", parent=self.root)
+                if detalle is None:
+                    return
+            elif not messagebox.askyesno("Confirmar", f"¿{verbo} el pedido #{pid}?"):
+                return
+            self.ejecutar(lambda: db.cambiar_estado(pid, nuevo, u, detalle), cargar, f"Pedido #{pid}: {nuevo}.")
+
+        def ver():
+            pid = seleccionado(tree, "Selecciona un pedido de la tabla.")
+            if pid is not None:
+                self.detalle_pedido(pid)
+
+        vendedor_b = [("✅ Aprobar", "APROBADO", "Aprobar", "exito"), ("❌ Rechazar", "RECHAZADO", "Rechazar", "peligro"),
+                      ("🚚 Despachar", "DESPACHADO", "Marcar como despachado", "info")]
+        comprador_b = [("📥 Confirmar recepción", "ENTREGADO", "Confirmar la recepción de", "info"),
+                       ("🚫 Cancelar", "CANCELADO", "Cancelar", "peligro")]
+        cliente_b = [("📦 Entregado al cliente", "ENTREGADO", "Marcar como entregado", "info")]
+        lista = {"recibidos": vendedor_b + (comprador_b if admin else []),
+                 "compras": comprador_b, "ventas": vendedor_b + cliente_b}[modo]
+
+        acc = tk.Frame(c, bg=FONDO)
+        acc.pack(fill="x")
+        cambios = tk.Frame(acc, bg=FONDO)
+        cambios.pack(side="left")
+        for texto, nuevo, verbo, color in lista:
+            boton(cambios, texto, lambda n=nuevo, v=verbo: cambiar(n, v), color)
+        boton(acc, "🔎 Ver detalle", ver, "neutro", "right")
+        tree.bind("<Double-1>", lambda _e: ver())
+        cargar()
+
+    def detalle_pedido(self, pedido_id):
+        p = db.obtener_pedido(pedido_id)
+        if not p:
+            return
+        win = tk.Toplevel(self.root)
+        win.title(f"Pedido #{pedido_id}")
+        win.configure(bg=FONDO)
+        win.geometry("800x600")
+        tk.Label(win, text=f"Pedido #{pedido_id} · {p['estado']}", font=("Segoe UI", 16, "bold"), bg=FONDO,
+                 fg=TEXTO, anchor="w").pack(fill="x", padx=20, pady=(18, 0))
+        tk.Label(win, text=f"Comprador: {p['usuario']} ({p['tienda']})   ·   Vendedor: {p['vendedor']}   ·   "
+                           f"Total: {db.dinero(p['total'])}", font=FUENTE, bg=FONDO, fg=GRIS, anchor="w").pack(fill="x", padx=20)
+        cont = tk.Frame(win, bg=FONDO)
+        cont.pack(fill="both", expand=True, padx=20, pady=12)
+        tk.Label(cont, text="Productos", font=FUENTE_B, bg=FONDO).pack(anchor="w", pady=(0, 3))
+        t1 = crear_tabla(cont, ("Producto", "Lote", "Vence", "Cant.", "P. unitario", "Subtotal", "Venta al público"),
+                         (200, 80, 95, 55, 95, 95, 120), 5, izq=("Producto",))
+        llenar(t1, [(i["nombre_producto"], i["lote"], i["fecha_vencimiento"], i["cantidad"], db.dinero(i["precio_unitario"]),
+                     db.dinero(i["cantidad"] * i["precio_unitario"]), db.dinero(i["precio_publico"]))
+                    for i in db.items_pedido(pedido_id)])
+        tk.Label(cont, text="Seguimiento", font=FUENTE_B, bg=FONDO).pack(anchor="w", pady=(8, 3))
+        t2 = crear_tabla(cont, ("Fecha", "Estado", "Usuario", "Detalle"), (150, 110, 110, 300), 5, izq=("Detalle",))
+        llenar(t2, [(h["fecha"], h["estado"], h["usuario"], h["detalle"]) for h in db.historial_pedido(pedido_id)])
+
+    # ------------------------------------------------ pedir / comprar (carrito)
+    def vista_pedir_mayorista(self):
+        self._vista_carrito("mayorista")
+
+    def vista_comprar_tienda(self):
+        self._vista_carrito("tienda")
+
+    def _vista_carrito(self, origen):
+        u = self.usuario
+        mayorista = origen == "mayorista"
+        c = self.nueva_vista("🛒 Pedir al mayorista" if mayorista else "🛒 Comprar en una tienda",
+                             ("Elige productos y cantidades" if mayorista else "Compra directamente a un tendero")
+                             + f" · entrega en {u['direccion']}")
+        self.carrito = []
+        estado = {"tienda": None, "catalogo": {}}
+
+        if not mayorista:
+            tiendas = [t for t in db.listar_tiendas() if t["id"] != u["id"]]
+            fila = tk.Frame(c, bg=FONDO)
+            fila.pack(fill="x", pady=(0, 8))
+            tk.Label(fila, text="Tienda:", bg=FONDO, font=FUENTE_B).pack(side="left")
+            combo = ttk.Combobox(fila, state="readonly", width=66,
+                                 values=[f"{t['nombre_tienda']} — {t['direccion']}  ({t['productos']} productos)" for t in tiendas])
+            combo.pack(side="left", padx=8)
+            if not tiendas:
+                tk.Label(fila, text="Aún no hay tiendas registradas.", bg=FONDO, fg=GRIS, font=FUENTE).pack(side="left")
+
+        if mayorista:
+            cols, anchos = ("ID", "Producto", "Lote", "Disponible", "P. mayorista", "P. sugerido", "Vence"), (45, 230, 90, 85, 105, 105, 100)
+        else:
+            cols, anchos = ("ID", "Producto", "Lote", "Disponible", "Precio", "Vence"), (45, 260, 100, 90, 110, 110)
+        cat = crear_tabla(c, cols, anchos, 6, izq=("Producto",))
+
+        def cargar_catalogo():
+            if mayorista:
+                filas = [{"id": p["id"], "nombre": p["nombre"], "lote": p["lote"], "cant": p["cantidad"],
+                          "precio": p["precio_mayorista"], "sug": p["precio_sugerido"], "venc": p["fecha_vencimiento"]}
+                         for p in db.listar_productos(solo_disponibles=True)]
+            elif estado["tienda"]:
+                filas = [{"id": p["id"], "nombre": p["nombre_producto"], "lote": p["lote"], "cant": p["cantidad"],
+                          "precio": p["precio_venta"], "sug": p["precio_venta"], "venc": p["fecha_vencimiento"]}
+                         for p in db.catalogo_tienda(estado["tienda"])]
+            else:
+                filas = []
+            estado["catalogo"] = {f["id"]: f for f in filas}
+            if mayorista:
+                llenar(cat, [(f["id"], f["nombre"], f["lote"], f["cant"], db.dinero(f["precio"]), db.dinero(f["sug"]), f["venc"]) for f in filas])
+            else:
+                llenar(cat, [(f["id"], f["nombre"], f["lote"], f["cant"], db.dinero(f["precio"]), f["venc"]) for f in filas])
+
+        fila = tk.Frame(c, bg=FONDO)
+        fila.pack(fill="x", pady=(2, 4))
+        tk.Label(fila, text="Cantidad:", bg=FONDO, font=FUENTE_B).pack(side="left")
+        e_cant = entrada(fila, 8)
+        e_cant.pack(side="left", padx=(6, 18), ipady=3)
+        e_pub = None
+        if mayorista:
+            tk.Label(fila, text="Tu precio de venta al público ($):", bg=FONDO, font=FUENTE_B).pack(side="left")
+            e_pub = entrada(fila, 10)
+            e_pub.pack(side="left", padx=6, ipady=3)
+
+        def al_elegir_producto(_=None):
             sel = cat.selection()
-            if sel:
-                p = db.obtener_producto(int(cat.item(sel[0])["values"][0]))
-                e_pub.delete(0, tk.END)
-                e_pub.insert(0, int(p["precio_sugerido"]))
+            if sel and e_pub is not None:
+                f = estado["catalogo"].get(int(cat.item(sel[0])["values"][0]))
+                if f:
+                    e_pub.delete(0, tk.END)
+                    e_pub.insert(0, int(f["sug"]))
 
-        cat.bind("<<TreeviewSelect>>", al_elegir)
+        cat.bind("<<TreeviewSelect>>", al_elegir_producto)
 
-        cols_c = ("ID", "Producto", "Lote", "Cant.", "P. unitario", "Subtotal", "Venta al público")
-        tk.Label(c, text="🧺 Tu pedido", font=("Arial", 11, "bold"), bg=BG).pack(pady=(8, 0))
-        carro = crear_tabla(c, cols_c, (45, 210, 90, 60, 110, 110, 120), 5)
-        lbl_total = tk.Label(c, text="", font=("Arial", 11, "bold"), bg=BG)
+        tk.Label(c, text="🧺 Tu pedido", font=("Segoe UI", 12, "bold"), bg=FONDO, fg=TEXTO).pack(anchor="w", pady=(8, 2))
+        cols_c = ("ID", "Producto", "Lote", "Cant.", "Precio unit.", "Subtotal") + (("Tu precio al público",) if mayorista else ())
+        carro = crear_tabla(c, cols_c, (45, 230, 90, 60, 105, 105, 140)[:len(cols_c)], 4, izq=("Producto",))
+        acc = tk.Frame(c, bg=FONDO)
+        acc.pack(fill="x")
 
         def refrescar():
-            llenar(carro, [(i["id"], i["nombre"], i["lote"], i["cant"], db.dinero(i["precio"]),
-                            db.dinero(i["cant"] * i["precio"]), db.dinero(i["pub"])) for i in self.carrito])
-            lbl_total.config(text=f"Total a pagar al mayorista: "
-                                  f"{db.dinero(sum(i['cant'] * i['precio'] for i in self.carrito))}")
+            filas = []
+            for i in self.carrito:
+                f = (i["id"], i["nombre"], i["lote"], i["cant"], db.dinero(i["precio"]), db.dinero(i["cant"] * i["precio"]))
+                filas.append(f + ((db.dinero(i["pub"]),) if mayorista else ()))
+            llenar(carro, filas)
+            lbl_total.config(text=f"Total: {db.dinero(sum(i['cant'] * i['precio'] for i in self.carrito))}")
+
+        if not mayorista:
+            def al_elegir_tienda(_=None):
+                idx = combo.current()
+                if idx < 0:
+                    return
+                nueva = tiendas[idx]["id"]
+                if self.carrito and nueva != estado["tienda"]:
+                    if not messagebox.askyesno("Cambiar de tienda", "Al cambiar de tienda se vacía tu pedido actual. ¿Continuar?"):
+                        combo.current([t["id"] for t in tiendas].index(estado["tienda"]))
+                        return
+                    self.carrito.clear()
+                    refrescar()
+                estado["tienda"] = nueva
+                cargar_catalogo()
+
+            combo.bind("<<ComboboxSelected>>", al_elegir_tienda)
 
         def agregar():
             pid = seleccionado(cat, "Selecciona un producto del catálogo.")
             if pid is None:
                 return
-            p = db.obtener_producto(pid)
+            f = estado["catalogo"].get(pid)
+            if not f:
+                return
             try:
                 cant = db.validar_entero(e_cant.get(), "La cantidad", 1)
-                pub = db.validar_numero(e_pub.get(), "El precio al público")
+                pub = db.validar_numero(e_pub.get(), "El precio al público") if mayorista else f["precio"]
             except db.ErrorNegocio as e:
                 messagebox.showerror("Revisa los datos", str(e))
                 return
             ya = sum(i["cant"] for i in self.carrito if i["id"] == pid)
-            if ya + cant > p["cantidad"]:
-                messagebox.showerror("Stock", f"Solo hay {p['cantidad']} unidades disponibles (ya tienes {ya} en el pedido).")
+            if ya + cant > f["cant"]:
+                messagebox.showerror("Stock", f"Solo hay {f['cant']} unidades disponibles (ya tienes {ya} en el pedido).")
                 return
             for i in self.carrito:
                 if i["id"] == pid:
@@ -389,8 +728,8 @@ class App:
                     i["pub"] = pub
                     break
             else:
-                self.carrito.append({"id": pid, "nombre": p["nombre"], "lote": p["lote"], "cant": cant,
-                                     "precio": p["precio_mayorista"], "pub": pub})
+                self.carrito.append({"id": pid, "nombre": f["nombre"], "lote": f["lote"], "cant": cant,
+                                     "precio": f["precio"], "pub": pub})
             e_cant.delete(0, tk.END)
             refrescar()
 
@@ -404,156 +743,188 @@ class App:
             if not self.carrito:
                 messagebox.showwarning("Pedido vacío", "Agrega al menos un producto.")
                 return
-            if not messagebox.askyesno("Confirmar", "¿Enviar la solicitud de pedido al mayorista?"):
+            if not messagebox.askyesno("Confirmar", "¿Enviar el pedido?"):
                 return
-            ok, pedido_id = self.ejecutar(lambda: db.crear_pedido(
-                u, [(i["id"], i["cant"], i["pub"]) for i in self.carrito]))
+            items = ([(i["id"], i["cant"], i["pub"]) for i in self.carrito] if mayorista
+                     else [(i["id"], i["cant"]) for i in self.carrito])
+            ok, pedido_id = self.ejecutar(lambda: db.crear_pedido(u, items, tienda_id=None if mayorista else estado["tienda"]))
             if ok:
                 self.carrito = []
-                messagebox.showinfo("Pedido enviado", f"Pedido #{pedido_id} enviado.\n"
-                                    "Queda PENDIENTE hasta que el mayorista lo apruebe.")
-                self.vista_catalogo()
+                messagebox.showinfo("Pedido enviado", f"Pedido #{pedido_id} enviado.\nQueda PENDIENTE hasta que "
+                                    f"{'el mayorista' if mayorista else 'la tienda'} lo apruebe.")
+                self._vista_carrito(origen)
 
-        acc = tk.Frame(c, bg=BG)
-        acc.pack(fill="x")
-        boton(acc, "➕ Agregar al pedido", agregar, "#28a745")
-        boton(acc, "➖ Quitar", quitar, "#6c757d")
-        boton(acc, "📨 Enviar pedido", enviar, "#007bff", "right")
-        lbl_total.pack(side="bottom", pady=4)
+        boton(acc, "➕ Agregar al pedido", agregar, "exito")
+        boton(acc, "➖ Quitar", quitar, "neutro")
+        boton(acc, "📨 Enviar pedido", enviar, "primario", "right")
+        lbl_total = tk.Label(acc, text="", font=("Segoe UI", 12, "bold"), bg=FONDO, fg=TEXTO)
+        lbl_total.pack(side="right", padx=14)
+        cargar_catalogo()
         refrescar()
 
+    # ------------------------------------------------- tendero: mi inventario
     def vista_mi_inventario(self):
-        c = self.nueva_vista(f"📦 Inventario de tu tienda: {self.usuario['tienda']}")
-        tree = crear_tabla(c, ("Producto", "Unidades", "Precio de venta"), (320, 120, 160), 15)
-        llenar(tree, [(i["nombre_producto"], i["cantidad"], db.dinero(i["precio_venta"]))
-                      for i in db.inventario_tienda(self.usuario)])
-        tk.Label(c, text="Se actualiza automáticamente cuando confirmas la llegada de un pedido.",
-                 bg=BG, fg="gray").pack()
+        u = self.usuario
+        c = self.nueva_vista("🏪 Mi inventario", f"{u['tienda']} · lo que compraste al mayorista, con lote, vencimiento y ganancia")
+        dias = int(db.get_config("dias_alerta_vencimiento", 7))
+        filas_db = db.inventario_tienda(u)
+        costo = sum(i["cantidad"] * i["costo_unitario"] for i in filas_db)
+        potencial = sum(i["cantidad"] * (i["precio_venta"] - i["costo_unitario"]) for i in filas_db
+                        if "VENCIDO" not in db.estados_producto(i, dias)[0])
+        n_alerta = sum(1 for i in filas_db if set(db.estados_producto(i, dias)[0]) & {"VENCIDO", "POR VENCER"})
+        tarjetas(c, [{"titulo": "Valor del inventario (a costo)", "valor": db.dinero(costo), "nivel": "info"},
+                     {"titulo": "Ganancia potencial si lo vendes todo", "valor": db.dinero(potencial), "nivel": "ok"},
+                     {"titulo": "Productos vencidos o por vencer", "valor": n_alerta, "nivel": "malo" if n_alerta else "ok"}])
+        cols = ("ID", "Producto", "Lote", "Unidades", "Costo", "Precio venta", "Margen", "Vence", "Estado")
+        tree = crear_tabla(c, cols, (45, 210, 80, 75, 90, 100, 75, 95, 140), 10, izq=("Producto",))
+        filas, tags = [], []
+        for i in filas_db:
+            est, _d = db.estados_producto(i, dias)
+            margen = (i["precio_venta"] - i["costo_unitario"]) / i["precio_venta"] * 100
+            filas.append((i["id"], i["nombre_producto"], i["lote"], i["cantidad"], db.dinero(i["costo_unitario"]),
+                          db.dinero(i["precio_venta"]), f"{margen:.0f}%", i["fecha_vencimiento"], ", ".join(est) or "OK"))
+            tags.append(tag_de(est[0]) if est else None)
+        llenar(tree, filas, tags)
 
-    # --------------------------------------------------------------- pedidos
-    def vista_pedidos(self, historial):
-        mayorista = self.es_mayorista
-        if historial:
-            titulo = "🗂️ Historial de pedidos y entregas"
-            estados = db.ESTADOS_FINALES
-        else:
-            titulo = "📋 Pedidos en curso" if mayorista else "📋 Mis pedidos en curso"
-            estados = db.ESTADOS_ACTIVOS
-        c = self.nueva_vista(titulo)
-        cols = ("ID", "Fecha", "Cliente", "Tienda", "Dirección", "Productos", "Total", "Estado")
-        tree = crear_tabla(c, cols, (45, 130, 80, 130, 150, 270, 90, 100), 14)
-
-        def cargar():
-            llenar(tree, [(p["id"], p["fecha_creacion"][:16], p["usuario"], p["tienda"], p["direccion"],
-                           p["resumen"], db.dinero(p["total"]), p["estado"])
-                          for p in db.listar_pedidos(self.usuario, estados)])
-
-        def cambiar(nuevo, mensaje):
-            pid = seleccionado(tree, "Selecciona un pedido de la tabla.")
-            if pid is None:
+        def precio():
+            iid = seleccionado(tree)
+            if iid is None:
                 return
-            detalle = ""
-            if nuevo == "RECHAZADO":
-                detalle = simpledialog.askstring("Rechazar pedido", "Motivo (opcional):", parent=self.root)
-                if detalle is None:
-                    return
-            elif not messagebox.askyesno("Confirmar", f"¿{mensaje} el pedido #{pid}?"):
+            nuevo = simpledialog.askstring("Precio de venta", "Nuevo precio de venta al público ($):", parent=self.root)
+            if nuevo:
+                self.ejecutar(lambda: db.actualizar_precio_venta(u, iid, nuevo), self.vista_mi_inventario)
+
+        def retirar():
+            iid = seleccionado(tree)
+            if iid is None:
                 return
-            self.ejecutar(lambda: db.cambiar_estado(pid, nuevo, self.usuario, detalle), cargar,
-                          f"Pedido #{pid}: {nuevo}.")
+            if messagebox.askyesno("Retirar producto vencido", "Se retirará este lote de tu inventario y se registrará "
+                                   "la pérdida (unidades × costo). ¿Continuar?"):
+                ok, perdida = self.ejecutar(lambda: db.retirar_vencido_tienda(u, iid), self.vista_mi_inventario)
+                if ok:
+                    messagebox.showinfo("Pérdida registrada", f"Pérdida por vencimiento: {db.dinero(perdida)}.")
 
-        def ver():
-            pid = seleccionado(tree, "Selecciona un pedido de la tabla.")
-            if pid is not None:
-                self.detalle_pedido(pid)
-
-        acc = tk.Frame(c, bg=BG)
+        acc = tk.Frame(c, bg=FONDO)
         acc.pack(fill="x")
-        if not historial:
-            if mayorista:
-                boton(acc, "✅ Aprobar", lambda: cambiar("APROBADO", "Aprobar"), "#28a745")
-                boton(acc, "❌ Rechazar", lambda: cambiar("RECHAZADO", "Rechazar"), "#dc3545")
-                boton(acc, "🚚 Marcar despachado", lambda: cambiar("DESPACHADO", "Marcar como despachado"), "#17a2b8")
-            if not mayorista or self.usuario["rol"] == "Administrador":
-                boton(acc, "📥 Confirmar llegada a la tienda", lambda: cambiar("ENTREGADO", "Confirmar la llegada de"), "#17a2b8")
-                boton(acc, "🚫 Cancelar pedido", lambda: cambiar("CANCELADO", "Cancelar"), "#dc3545")
-        boton(acc, "🔎 Ver detalle", ver, "#6c757d", "right")
-        tree.bind("<Double-1>", lambda _e: ver())
-        cargar()
-
-    def detalle_pedido(self, pedido_id):
-        win = tk.Toplevel(self.root)
-        win.title(f"Pedido #{pedido_id}")
-        win.configure(bg=BG)
-        win.geometry("760x520")
-        tk.Label(win, text=f"Pedido #{pedido_id} — productos", font=("Arial", 11, "bold"), bg=BG).pack(pady=(10, 0))
-        t1 = crear_tabla(win, ("Producto", "Lote", "Cant.", "P. unitario", "Subtotal", "Venta al público"),
-                         (210, 90, 60, 100, 100, 120), 6)
-        llenar(t1, [(i["nombre_producto"], i["lote"], i["cantidad"], db.dinero(i["precio_unitario"]),
-                     db.dinero(i["cantidad"] * i["precio_unitario"]), db.dinero(i["precio_publico"]))
-                    for i in db.items_pedido(pedido_id)])
-        tk.Label(win, text="Seguimiento (historial de estados)", font=("Arial", 11, "bold"), bg=BG).pack(pady=(10, 0))
-        t2 = crear_tabla(win, ("Fecha", "Estado", "Usuario", "Detalle"), (150, 110, 100, 300), 6)
-        llenar(t2, [(h["fecha"], h["estado"], h["usuario"], h["detalle"]) for h in db.historial_pedido(pedido_id)])
+        boton(acc, "✏️ Cambiar precio de venta", precio, "primario")
+        boton(acc, "⏳ Retirar vencido (pérdida)", retirar, "aviso")
 
     # --------------------------------------------------------------- alertas
-    def vista_alertas(self):
-        dias = db.get_config("dias_alerta_vencimiento", 15)
-        c = self.nueva_vista(f"⚠️ Alertas de inventario (vencimiento: próximos {dias} días)")
-        r = db.resumen_alertas()
-        fila = tk.Frame(c, bg=BG)
-        fila.pack(pady=4)
-        for tipo, n in r.items():
-            tk.Label(fila, text=f"{tipo}: {n}", bg=COLORES_ALERTA[tipo], font=("Arial", 10, "bold"),
-                     padx=12, pady=4).pack(side="left", padx=6)
+    def vista_alertas(self, ambito):
+        u = self.usuario
+        mayorista = ambito == "mayorista"
+        dias = db.get_config("dias_alerta_vencimiento", 7)
+        c = self.nueva_vista("⚠️ Alertas de inventario" if mayorista else "⚠️ Alertas de mi tienda",
+                             f"Vencimientos con {dias} días de anticipación" + (", agotados y stock mínimo" if mayorista else ""))
+        lista = db.alertas() if mayorista else db.alertas_tienda(u)
+        cuenta = {t: 0 for t in ALERTAS_COLOR}
+        for a in lista:
+            cuenta[a["tipo"]] += 1
+        fila = tk.Frame(c, bg=FONDO)
+        fila.pack(fill="x", pady=(0, 10))
+        for tipo, n in cuenta.items():
+            if mayorista or tipo in ("VENCIDO", "POR VENCER"):
+                tk.Label(fila, text=f"{tipo}: {n}", bg=ALERTAS_COLOR[tipo], fg=TEXTO, font=FUENTE_B, padx=14, pady=6).pack(side="left", padx=(0, 8))
         cols = ("Alerta", "Producto", "Lote", "Stock", "Mínimo", "Vence", "Días")
-        tree = crear_tabla(c, cols, (110, 220, 90, 70, 70, 100, 140), 14)
-        filas, tags = [], []
-        for a in db.alertas():
-            d = a["dias"]
-            txt = f"vencido hace {-d} d" if d < 0 else ("vence hoy" if d == 0 else f"faltan {d} d")
-            filas.append((a["tipo"], a["nombre"], a["lote"], a["cantidad"], a["stock_minimo"], a["vencimiento"], txt))
-            tags.append(tag_de(a["tipo"]))
-        llenar(tree, filas, tags)
-        boton(c, "💾 Exportar a CSV", lambda: self.exportar("alertas_inventario", cols, filas), "#6c757d", "top")
+        tree = crear_tabla(c, cols, (120, 250, 90, 70, 70, 100, 150), 13, izq=("Producto",))
+        filas = [(a["tipo"], a["nombre"], a["lote"], a["cantidad"], a["stock_minimo"] if a["stock_minimo"] is not None else "—",
+                  a["vencimiento"], texto_dias(a["dias"])) for a in lista]
+        llenar(tree, filas, [tag_de(a["tipo"]) for a in lista])
+        boton(c, "💾 Exportar a CSV", lambda: self.exportar("alertas_inventario", cols, filas), "neutro", "top")
+        if not lista:
+            tk.Label(c, text="✅ No hay alertas.", font=FUENTE_B, bg=FONDO, fg=COLORES["exito"]).pack(anchor="w")
 
     # -------------------------------------------------------------- reportes
     def vista_reportes(self):
-        c = self.nueva_vista("📊 Reportes")
+        c = self.nueva_vista("📊 Reportes", "Resumen del inventario y de los pedidos del mayorista")
         nb = ttk.Notebook(c)
-        nb.pack(fill="both", expand=True, padx=6, pady=4)
+        nb.pack(fill="both", expand=True)
 
-        def pestana(titulo, cols, anchos, filas):
-            f = tk.Frame(nb, bg=BG)
+        def pestana(titulo, cols, anchos, filas, izq=()):
+            f = tk.Frame(nb, bg=FONDO, padx=10, pady=10)
             nb.add(f, text=titulo)
-            tree = crear_tabla(f, cols, anchos, 14)
+            tree = crear_tabla(f, cols, anchos, 12, izq=izq)
             llenar(tree, filas)
-            boton(f, "💾 Exportar a CSV", lambda: self.exportar(titulo.lower().replace(" ", "_"), cols, filas),
-                  "#6c757d", "top")
+            boton(f, "💾 Exportar a CSV", lambda: self.exportar(titulo.lower().replace(" ", "_"), cols, filas), "neutro", "top")
 
-        pestana("Resumen", ("Indicador", "Valor"), (360, 200), db.resumen_general())
-        venc = [(a["tipo"], a["nombre"], a["lote"], a["cantidad"], a["vencimiento"], a["dias"])
+        pestana("Resumen", ("Indicador", "Valor"), (380, 220), db.resumen_general(), ("Indicador",))
+        venc = [(a["tipo"], a["nombre"], a["lote"], a["cantidad"], a["vencimiento"], texto_dias(a["dias"]))
                 for a in db.alertas() if a["tipo"] in ("VENCIDO", "POR VENCER")]
-        pestana("Por vencer", ("Estado", "Producto", "Lote", "Stock", "Vence", "Días"),
-                (110, 230, 90, 70, 100, 70), venc)
-        pestana("Más solicitados", ("Producto", "Unidades pedidas", "N° de pedidos", "Valor ($)"), (250, 130, 110, 130),
-                [(m["producto"], m["unidades"], m["pedidos"], db.dinero(m["valor"])) for m in db.reporte_mas_solicitados()])
-        pestana("Pedidos por estado", ("Estado", "Cantidad", "Total ($)"), (160, 110, 150),
+        pestana("Por vencer", ("Estado", "Producto", "Lote", "Stock", "Vence", "Días"), (110, 240, 90, 70, 100, 150), venc, ("Producto",))
+        pestana("Más solicitados", ("Producto", "Unidades pedidas", "N° de pedidos", "Valor ($)"), (260, 140, 120, 140),
+                [(m["producto"], m["unidades"], m["pedidos"], db.dinero(m["valor"])) for m in db.reporte_mas_solicitados()], ("Producto",))
+        pestana("Pedidos por estado", ("Estado", "Cantidad", "Total ($)"), (170, 120, 160),
                 [(e["estado"], e["cantidad"], db.dinero(e["total"])) for e in db.reporte_pedidos_por_estado()])
+        pestana("Pérdidas por vencimiento", ("Fecha", "Producto", "Lote", "Cant.", "Costo unit.", "Pérdida", "Motivo", "Responsable"),
+                (120, 180, 70, 55, 90, 95, 80, 100),
+                [(m["fecha"][:16], m["producto"], m["lote"], m["cantidad"], db.dinero(m["costo_unitario"]),
+                  db.dinero(m["cantidad"] * m["costo_unitario"]), m["motivo"], m["usuario"]) for m in db.reporte_mermas()], ("Producto",))
         pestana("Movimientos", ("Fecha", "Producto", "Lote", "Tipo", "Cant.", "Detalle", "Responsable"),
-                (130, 170, 70, 80, 60, 230, 100),
+                (120, 170, 70, 85, 55, 230, 100),
                 [(m["fecha"][:16], m["producto"], m["lote"], m["tipo"], m["cantidad"], m["detalle"], m["usuario"])
-                 for m in db.reporte_movimientos()])
+                 for m in db.reporte_movimientos()], ("Producto", "Detalle"))
 
-    # ---------------------------------------------------------- administración
+    # -------------------------------------------------------------- ganancias
+    def vista_ganancias(self, ambito):
+        u = self.usuario
+        mayorista = ambito == "mayorista"
+        c = self.nueva_vista("💰 Ganancias" if mayorista else "💰 Mis ganancias",
+                             "Lo que gana el mayorista al vender a los tenderos" if mayorista
+                             else "Lo que ganas al vender a tus compradores, menos lo que pierdes por vencimiento")
+        barra = tk.Frame(c, bg=FONDO)
+        barra.pack(fill="x", pady=(0, 8))
+        tk.Label(barra, text="Periodo:", bg=FONDO, font=FUENTE_B).pack(side="left")
+        periodos = ["Todo el tiempo", "Este mes", "Últimos 7 días"]
+        combo = ttk.Combobox(barra, state="readonly", values=periodos, width=18)
+        combo.set(periodos[0])
+        combo.pack(side="left", padx=8)
+        zona = tk.Frame(c, bg=FONDO)
+        zona.pack(fill="both", expand=True)
+
+        def dibujar(_=None):
+            for w in zona.winfo_children():
+                w.destroy()
+            desde = {"Este mes": date.today().replace(day=1).isoformat(),
+                     "Últimos 7 días": (date.today() - timedelta(days=7)).isoformat()}.get(combo.get())
+            g = db.ganancias(u, ambito, desde)
+            neta_nivel = "ok" if g["ganancia_neta"] >= 0 else "malo"
+            tarjetas(zona, [
+                {"titulo": "Ventas", "valor": db.dinero(g["ventas"]), "nivel": "info"},
+                {"titulo": "Costo de lo vendido", "valor": db.dinero(g["costo"]), "nivel": "info"},
+                {"titulo": "Ganancia bruta", "valor": db.dinero(g["ganancia_bruta"]), "nivel": "ok"},
+                {"titulo": "Pérdidas por vencimiento", "valor": db.dinero(g["perdidas"]), "nivel": "malo" if g["perdidas"] else "ok"},
+                {"titulo": "Ganancia neta", "valor": db.dinero(g["ganancia_neta"]), "nivel": neta_nivel},
+                {"titulo": "Margen bruto", "valor": f"{g['margen']:.1f}%", "nivel": "info"}])
+            nb = ttk.Notebook(zona)
+            nb.pack(fill="both", expand=True)
+            f1 = tk.Frame(nb, bg=FONDO, padx=8, pady=8)
+            nb.add(f1, text="Por producto")
+            cols = ("Producto", "Unidades", "Ventas", "Costo", "Ganancia", "Margen")
+            t1 = crear_tabla(f1, cols, (260, 90, 110, 110, 110, 80), 7, izq=("Producto",))
+            filas = [(f["producto"], f["unidades"], db.dinero(f["ventas"]), db.dinero(f["costo"]),
+                      db.dinero(f["ganancia"]), f"{f['margen']:.0f}%") for f in g["filas"]]
+            llenar(t1, filas)
+            boton(f1, "💾 Exportar a CSV", lambda: self.exportar("ganancias", cols, filas), "neutro", "top")
+            f2 = tk.Frame(nb, bg=FONDO, padx=8, pady=8)
+            nb.add(f2, text="Pérdidas por vencimiento")
+            t2 = crear_tabla(f2, ("Fecha", "Producto", "Lote", "Cant.", "Costo unit.", "Pérdida"), (130, 220, 80, 60, 100, 110), 7,
+                             izq=("Producto",))
+            llenar(t2, [(m["fecha"][:16], m["producto"], m["lote"], m["cantidad"], db.dinero(m["costo_unitario"]),
+                         db.dinero(m["cantidad"] * m["costo_unitario"]))
+                        for m in db.reporte_mermas(None if mayorista else u, desde)])
+
+        combo.bind("<<ComboboxSelected>>", dibujar)
+        dibujar()
+
+    # --------------------------------------------------------- administración
     def vista_admin(self):
-        c = self.nueva_vista("👥 Administración: usuarios y parámetros")
-        cols = ("ID", "Usuario", "Rol", "Tienda", "Dirección", "Activo")
-        tree = crear_tabla(c, cols, (45, 110, 110, 190, 230, 70), 8)
+        c = self.nueva_vista("👥 Administración", "Usuarios del sistema y parámetros de alertas")
+        tree = crear_tabla(c, ("ID", "Usuario", "Rol", "Tienda", "Dirección", "Activo"), (45, 120, 120, 220, 270, 70), 7,
+                           izq=("Tienda", "Dirección"))
 
         def cargar():
-            llenar(tree, [(u["id"], u["usuario"], u["rol"], u["nombre_tienda"], u["direccion"],
-                           "Sí" if u["activo"] else "No") for u in db.listar_usuarios()])
+            llenar(tree, [(u["id"], u["usuario"], u["rol"], u["nombre_tienda"], u["direccion"], "Sí" if u["activo"] else "No")
+                          for u in db.listar_usuarios()])
 
         def crear():
             def guardar(v):
@@ -580,30 +951,31 @@ class App:
             uid = seleccionado(tree)
             if uid is None:
                 return
-            nueva = simpledialog.askstring("Cambiar contraseña", "Nueva contraseña (mín. 4 caracteres):",
-                                           show="*", parent=self.root)
+            nueva = simpledialog.askstring("Cambiar contraseña", "Nueva contraseña (mín. 4 caracteres):", show="*", parent=self.root)
             if nueva is not None:
                 self.ejecutar(lambda: db.cambiar_clave(uid, nueva), exito="Contraseña actualizada.")
 
-        acc = tk.Frame(c, bg=BG)
+        acc = tk.Frame(c, bg=FONDO)
         acc.pack(fill="x")
-        boton(acc, "➕ Nuevo usuario", crear, "#28a745")
-        boton(acc, "🔁 Activar / desactivar", alternar, "#6c757d")
-        boton(acc, "🔑 Cambiar contraseña", clave, "#007bff")
+        boton(acc, "➕ Nuevo usuario", crear, "exito")
+        boton(acc, "🔁 Activar / desactivar", alternar, "neutro")
+        boton(acc, "🔑 Cambiar contraseña", clave, "primario")
 
-        caja = tk.LabelFrame(c, text=" Parámetros de alertas ", bg=BG, font=("Arial", 10, "bold"), padx=10, pady=8)
-        caja.pack(fill="x", padx=10, pady=12)
-        tk.Label(caja, text="Días de anticipación para alertar vencimientos:", bg=BG, font=FUENTE).grid(row=0, column=0, sticky="w", pady=3)
-        e_dias = tk.Entry(caja, width=8)
-        e_dias.insert(0, db.get_config("dias_alerta_vencimiento", 15))
-        e_dias.grid(row=0, column=1, padx=8)
-        tk.Label(caja, text="Stock mínimo por defecto al registrar productos:", bg=BG, font=FUENTE).grid(row=1, column=0, sticky="w", pady=3)
-        e_min = tk.Entry(caja, width=8)
+        card = tk.Frame(c, bg=BLANCO, highlightthickness=1, highlightbackground=BORDE, padx=22, pady=16)
+        card.pack(fill="x", pady=(14, 0))
+        tk.Label(card, text="Parámetros de alertas", font=("Segoe UI", 12, "bold"), bg=BLANCO, fg=TEXTO).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        tk.Label(card, text="Días de anticipación para alertar vencimientos:", bg=BLANCO, font=FUENTE).grid(row=1, column=0, sticky="w", pady=4)
+        e_dias = entrada(card, 8)
+        e_dias.insert(0, db.get_config("dias_alerta_vencimiento", 7))
+        e_dias.grid(row=1, column=1, padx=10, ipady=3)
+        tk.Label(card, text="Stock mínimo por defecto al registrar productos:", bg=BLANCO, font=FUENTE).grid(row=2, column=0, sticky="w", pady=4)
+        e_min = entrada(card, 8)
         e_min.insert(0, db.get_config("stock_minimo_defecto", 10))
-        e_min.grid(row=1, column=1, padx=8)
-        tk.Button(caja, text="Guardar parámetros", bg="#28a745", fg="white", font=("Arial", 9, "bold"),
-                  command=lambda: self.ejecutar(lambda: db.guardar_configuracion(e_dias.get(), e_min.get()),
-                                                exito="Parámetros guardados.")).grid(row=2, column=0, columnspan=2, pady=6)
+        e_min.grid(row=2, column=1, padx=10, ipady=3)
+        Boton(card, "Guardar parámetros", lambda: self.ejecutar(
+            lambda: db.guardar_configuracion(e_dias.get(), e_min.get()), None, "Parámetros guardados."), "exito").grid(
+            row=1, column=2, rowspan=2, padx=(20, 0))
         cargar()
 
 
