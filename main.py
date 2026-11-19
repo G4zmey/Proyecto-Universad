@@ -408,9 +408,10 @@ class App:
             filas, tags = [], []
             for p in db.listar_productos(buscar.get().strip()):
                 est, _d = db.estados_producto(p, dias_alerta)
+                sin_precio = ["SIN PRECIO"] if p["precio_mayorista"] <= 0 else []
                 filas.append((p["id"], p["nombre"], p["lote"], p["cantidad"], p["stock_minimo"],
                               db.dinero(p["precio_costo"]), db.dinero(p["precio_mayorista"]),
-                              db.dinero(p["precio_sugerido"]), p["fecha_vencimiento"], ", ".join(est) or "OK"))
+                              db.dinero(p["precio_sugerido"]), p["fecha_vencimiento"], ", ".join(est + sin_precio) or "OK"))
                 tags.append(tag_de(est[0]) if est else None)
             llenar(tree, filas, tags)
 

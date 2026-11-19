@@ -219,3 +219,4 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 inventario_mayorista_v2.db
+respaldos/ 

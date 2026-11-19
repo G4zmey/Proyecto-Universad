@@ -134,46 +134,6 @@ CREATE TABLE IF NOT EXISTS configuracion (
     clave TEXT PRIMARY KEY,
     valor TEXT NOT NULL
 );
--- ---- Validación de datos: la base se defiende sola de lo que se escriba a mano (DBeaver, DB Browser...) ----
--- Fechas como AAAA-MM-DD, cantidades enteras y precios numéricos. Si algo no cumple, la edición se rechaza.
-CREATE TRIGGER IF NOT EXISTS validar_productos_ins AFTER INSERT ON productos
-WHEN date(NEW.fecha_vencimiento) IS NOT NEW.fecha_vencimiento OR typeof(NEW.cantidad) <> 'integer'
-  OR typeof(NEW.stock_minimo) <> 'integer' OR typeof(NEW.precio_costo) NOT IN ('integer', 'real')
-  OR typeof(NEW.precio_mayorista) NOT IN ('integer', 'real') OR typeof(NEW.precio_sugerido) NOT IN ('integer', 'real')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en productos: la fecha debe ser AAAA-MM-DD y cantidades/precios solo numeros'); END;
-CREATE TRIGGER IF NOT EXISTS validar_productos_upd AFTER UPDATE ON productos
-WHEN date(NEW.fecha_vencimiento) IS NOT NEW.fecha_vencimiento OR typeof(NEW.cantidad) <> 'integer'
-  OR typeof(NEW.stock_minimo) <> 'integer' OR typeof(NEW.precio_costo) NOT IN ('integer', 'real')
-  OR typeof(NEW.precio_mayorista) NOT IN ('integer', 'real') OR typeof(NEW.precio_sugerido) NOT IN ('integer', 'real')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en productos: la fecha debe ser AAAA-MM-DD y cantidades/precios solo numeros'); END;
-CREATE TRIGGER IF NOT EXISTS validar_inventario_tienda_ins AFTER INSERT ON inventario_tienda
-WHEN date(NEW.fecha_vencimiento) IS NOT NEW.fecha_vencimiento OR typeof(NEW.cantidad) <> 'integer'
-  OR typeof(NEW.costo_unitario) NOT IN ('integer', 'real') OR typeof(NEW.precio_venta) NOT IN ('integer', 'real')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en inventario_tienda: la fecha debe ser AAAA-MM-DD y cantidades/precios solo numeros'); END;
-CREATE TRIGGER IF NOT EXISTS validar_inventario_tienda_upd AFTER UPDATE ON inventario_tienda
-WHEN date(NEW.fecha_vencimiento) IS NOT NEW.fecha_vencimiento OR typeof(NEW.cantidad) <> 'integer'
-  OR typeof(NEW.costo_unitario) NOT IN ('integer', 'real') OR typeof(NEW.precio_venta) NOT IN ('integer', 'real')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en inventario_tienda: la fecha debe ser AAAA-MM-DD y cantidades/precios solo numeros'); END;
-CREATE TRIGGER IF NOT EXISTS validar_usuarios_ins AFTER INSERT ON usuarios
-WHEN NEW.rol NOT IN ('Administrador', 'Vendedor', 'Tendero', 'Comprador') OR NEW.activo NOT IN (0, 1)
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en usuarios: rol = Administrador, Vendedor, Tendero o Comprador; activo = 0 o 1'); END;
-CREATE TRIGGER IF NOT EXISTS validar_usuarios_upd AFTER UPDATE ON usuarios
-WHEN NEW.rol NOT IN ('Administrador', 'Vendedor', 'Tendero', 'Comprador') OR NEW.activo NOT IN (0, 1)
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en usuarios: rol = Administrador, Vendedor, Tendero o Comprador; activo = 0 o 1'); END;
-CREATE TRIGGER IF NOT EXISTS validar_pedidos_ins AFTER INSERT ON pedidos
-WHEN NEW.estado NOT IN ('PENDIENTE', 'APROBADO', 'DESPACHADO', 'ENTREGADO', 'RECHAZADO', 'CANCELADO')
-  OR NEW.tipo NOT IN ('MAYORISTA', 'TIENDA') OR typeof(NEW.total) NOT IN ('integer', 'real')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en pedidos: estado, tipo o total no validos'); END;
-CREATE TRIGGER IF NOT EXISTS validar_pedidos_upd AFTER UPDATE ON pedidos
-WHEN NEW.estado NOT IN ('PENDIENTE', 'APROBADO', 'DESPACHADO', 'ENTREGADO', 'RECHAZADO', 'CANCELADO')
-  OR NEW.tipo NOT IN ('MAYORISTA', 'TIENDA') OR typeof(NEW.total) NOT IN ('integer', 'real')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en pedidos: estado, tipo o total no validos'); END;
-CREATE TRIGGER IF NOT EXISTS validar_configuracion_ins AFTER INSERT ON configuracion
-WHEN NEW.clave IN ('dias_alerta_vencimiento', 'stock_minimo_defecto') AND (NEW.valor = '' OR NEW.valor GLOB '*[^0-9]*')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en configuracion: este parametro debe ser un numero entero'); END;
-CREATE TRIGGER IF NOT EXISTS validar_configuracion_upd AFTER UPDATE ON configuracion
-WHEN NEW.clave IN ('dias_alerta_vencimiento', 'stock_minimo_defecto') AND (NEW.valor = '' OR NEW.valor GLOB '*[^0-9]*')
-BEGIN SELECT RAISE(ABORT, 'Dato invalido en configuracion: este parametro debe ser un numero entero'); END;
 """
 
 USUARIOS_DEMO = [
@@ -182,6 +142,84 @@ USUARIOS_DEMO = [
     ("tendero", "1234", "Tendero", "Tienda Mi Barrio", "Cra 15 # 45-20, Soledad"),
     ("comprador", "1234", "Comprador", "Casa Familia Pérez", "Cra 8 # 30-15, Barranquilla"),
 ]
+
+
+def _sql_fecha_iso(tabla):
+    """Subconsulta SQL que devuelve la fecha de la fila NEW (de `tabla`) como AAAA-MM-DD cuando viene en un
+    formato común: 20/05/2030, 20-05-2030, 5/3/2030, 2030-5-2, 2030/05/20, con hora... (día primero)."""
+    n, sep = "[0-9]", "[/-]"
+    casos = [
+        (n * 4 + sep + n * 2 + sep + n * 2, "substr(d,1,4)||'-'||substr(d,6,2)||'-'||substr(d,9,2)"),
+        (n * 4 + sep + n + sep + n * 2, "substr(d,1,4)||'-0'||substr(d,6,1)||'-'||substr(d,8,2)"),
+        (n * 4 + sep + n * 2 + sep + n, "substr(d,1,4)||'-'||substr(d,6,2)||'-0'||substr(d,9,1)"),
+        (n * 4 + sep + n + sep + n, "substr(d,1,4)||'-0'||substr(d,6,1)||'-0'||substr(d,8,1)"),
+        (n * 2 + sep + n * 2 + sep + n * 4, "substr(d,7,4)||'-'||substr(d,4,2)||'-'||substr(d,1,2)"),
+        (n + sep + n * 2 + sep + n * 4, "substr(d,6,4)||'-'||substr(d,3,2)||'-0'||substr(d,1,1)"),
+        (n * 2 + sep + n + sep + n * 4, "substr(d,6,4)||'-0'||substr(d,4,1)||'-'||substr(d,1,2)"),
+        (n + sep + n + sep + n * 4, "substr(d,5,4)||'-0'||substr(d,3,1)||'-0'||substr(d,1,1)"),
+    ]
+    cuerpo = " ".join(f"WHEN d GLOB '{g}' THEN {r}" for g, r in casos)
+    col = "fecha_vencimiento"
+    t = f"trim({col})"      # se ignoran los espacios al principio y al final (muy comunes al copiar y pegar)
+    return (f"(SELECT CASE {cuerpo} ELSE x END FROM (SELECT CASE WHEN instr({t},' ') > 0 "
+            f"THEN substr({t},1,instr({t},' ')-1) WHEN instr({t},'T') > 0 THEN substr({t},1,instr({t},'T')-1) "
+            f"ELSE {t} END AS d, {col} AS x FROM {tabla} WHERE id = NEW.id))")
+
+
+def _sql_triggers():
+    """Reglas que se aplican a CUALQUIER cliente que toque la base (el programa, DBeaver, DB Browser...):
+    · arreglan solas lo que se pueda (formatos de fecha, datos que faltan, productos repetidos);
+    · rechazan con un mensaje claro lo que no tenga arreglo."""
+    num = "('integer', 'real')"
+    msg_fecha = ("la fecha debe ser real (ej. 2030-05-20 o 20/05/2030) y cantidades y precios deben ser solo "
+                 "numeros, sin $ ni puntos de miles")
+    cond = {"productos": ("date(fecha_vencimiento) IS NOT fecha_vencimiento OR typeof(cantidad) <> 'integer' OR "
+                          f"typeof(stock_minimo) <> 'integer' OR typeof(precio_costo) NOT IN {num} OR "
+                          f"typeof(precio_mayorista) NOT IN {num} OR typeof(precio_sugerido) NOT IN {num}"),
+            "inventario_tienda": ("date(fecha_vencimiento) IS NOT fecha_vencimiento OR typeof(cantidad) <> 'integer' OR "
+                                  f"typeof(costo_unitario) NOT IN {num} OR typeof(precio_venta) NOT IN {num}")}
+    sql = ["DROP TRIGGER IF EXISTS validar_productos_ins; DROP TRIGGER IF EXISTS validar_productos_upd;",
+           "DROP TRIGGER IF EXISTS validar_inventario_tienda_ins; DROP TRIGGER IF EXISTS validar_inventario_tienda_upd;"]
+    for tabla, c in cond.items():
+        for evento in ("INSERT", "UPDATE"):
+            sql.append(
+                f"CREATE TRIGGER IF NOT EXISTS ordenar_{tabla}_{evento[:3].lower()} AFTER {evento} ON {tabla} BEGIN "
+                f"UPDATE {tabla} SET fecha_vencimiento = {_sql_fecha_iso(tabla)} WHERE id = NEW.id "
+                "AND date(fecha_vencimiento) IS NOT fecha_vencimiento; "
+                f"SELECT RAISE(ABORT, 'Dato invalido en {tabla}: {msg_fecha}') FROM {tabla} WHERE id = NEW.id AND ({c}); END;")
+    # Agregar a mano un producto que ya existe (mismo nombre y lote) o con datos que faltan: no hay conflicto.
+    sql.append("""
+CREATE TRIGGER IF NOT EXISTS ingreso_manual_productos BEFORE INSERT ON productos
+WHEN EXISTS (SELECT 1 FROM productos WHERE nombre = NEW.nombre AND lote = NEW.lote)
+  OR NEW.cantidad IS NULL OR NEW.precio_mayorista IS NULL OR NEW.precio_sugerido IS NULL OR NEW.fecha_vencimiento IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'La cantidad debe ser un numero entero') WHERE typeof(NEW.cantidad) NOT IN ('integer', 'null');
+  -- ya existe ese producto y lote: se suman las unidades al que ya estaba
+  UPDATE productos SET cantidad = cantidad + COALESCE(NEW.cantidad, 0) WHERE nombre = NEW.nombre AND lote = NEW.lote;
+  INSERT INTO movimientos (fecha, producto_id, producto, lote, tipo, cantidad, detalle, usuario)
+    SELECT datetime('now', 'localtime'), id, nombre, lote, 'ENTRADA', COALESCE(NEW.cantidad, 0),
+           'Ingreso directo en la base de datos: se sumo al lote existente', 'base de datos'
+    FROM productos WHERE nombre = NEW.nombre AND lote = NEW.lote AND COALESCE(NEW.cantidad, 0) > 0;
+  -- producto nuevo pero con datos sin llenar: se completan con valores razonables
+  INSERT INTO productos (nombre, lote, cantidad, stock_minimo, precio_costo, precio_mayorista, precio_sugerido, fecha_vencimiento)
+    SELECT NEW.nombre, NEW.lote, COALESCE(NEW.cantidad, 0), COALESCE(NEW.stock_minimo, 10), COALESCE(NEW.precio_costo, 0),
+           COALESCE(NEW.precio_mayorista, 0), COALESCE(NEW.precio_sugerido, NEW.precio_mayorista, 0),
+           COALESCE(NEW.fecha_vencimiento, date('now', 'localtime', '+1 year'))
+    WHERE NOT EXISTS (SELECT 1 FROM productos WHERE nombre = NEW.nombre AND lote = NEW.lote);
+  SELECT RAISE(IGNORE);
+END;""")
+    for evento in ("INSERT", "UPDATE"):
+        sql.append(f"""CREATE TRIGGER IF NOT EXISTS validar_usuarios_{evento[:3].lower()} AFTER {evento} ON usuarios
+WHEN NEW.rol NOT IN ('Administrador', 'Vendedor', 'Tendero', 'Comprador') OR NEW.activo NOT IN (0, 1)
+BEGIN SELECT RAISE(ABORT, 'Dato invalido en usuarios: rol = Administrador, Vendedor, Tendero o Comprador; activo = 0 o 1'); END;
+CREATE TRIGGER IF NOT EXISTS validar_pedidos_{evento[:3].lower()} AFTER {evento} ON pedidos
+WHEN NEW.estado NOT IN ('PENDIENTE', 'APROBADO', 'DESPACHADO', 'ENTREGADO', 'RECHAZADO', 'CANCELADO')
+  OR NEW.tipo NOT IN ('MAYORISTA', 'TIENDA') OR typeof(NEW.total) NOT IN ('integer', 'real')
+BEGIN SELECT RAISE(ABORT, 'Dato invalido en pedidos: estado, tipo o total no validos'); END;
+CREATE TRIGGER IF NOT EXISTS validar_configuracion_{evento[:3].lower()} AFTER {evento} ON configuracion
+WHEN NEW.clave IN ('dias_alerta_vencimiento', 'stock_minimo_defecto') AND (NEW.valor = '' OR NEW.valor GLOB '*[^0-9]*')
+BEGIN SELECT RAISE(ABORT, 'Dato invalido en configuracion: este parametro debe ser un numero entero'); END;""")
+    return "\n".join(sql)
 
 
 # --------------------------------------------------------------------------
@@ -312,7 +350,7 @@ def init_db(demo=True):
     cuando la base es nueva: si luego borras productos, no vuelven a aparecer."""
     nueva = _preparar_archivo()
     with conexion() as con:
-        con.executescript(SCHEMA)
+        con.executescript(SCHEMA + _sql_triggers())
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         con.execute("INSERT OR IGNORE INTO configuracion VALUES ('dias_alerta_vencimiento', '7')")
         con.execute("INSERT OR IGNORE INTO configuracion VALUES ('stock_minimo_defecto', '10')")
@@ -344,6 +382,7 @@ def init_db(demo=True):
                         ("admin", _hash_clave("admin123"), "Administrador", "Mayorista Central", "Barranquilla"))
     if nueva and demo:
         _demo_pedidos()
+    sincronizar_movimientos()
 
 
 def _demo_pedidos():
@@ -363,6 +402,16 @@ def _demo_pedidos():
         cambiar_estado(p2, "ENTREGADO", t)
     except (ErrorNegocio, KeyError):
         pass
+
+
+def sincronizar_movimientos():
+    """Registra como ENTRADA los productos que alguien agregó directamente en la base (sin pasar por el programa)."""
+    with conexion() as con:
+        con.execute(
+            "INSERT INTO movimientos (fecha, producto_id, producto, lote, tipo, cantidad, detalle, usuario)"
+            " SELECT ?, id, nombre, lote, 'ENTRADA', cantidad, 'Ingreso directo en la base de datos', 'base de datos'"
+            " FROM productos p WHERE cantidad > 0 AND NOT EXISTS (SELECT 1 FROM movimientos m WHERE m.producto_id = p.id)",
+            (ahora(),))
 
 
 def respaldar(max_copias=10):
@@ -462,7 +511,7 @@ def obtener_producto(producto_id):
 def listar_productos(filtro="", solo_disponibles=False):
     sql, params = "SELECT * FROM productos WHERE 1 = 1", []
     if solo_disponibles:
-        sql += " AND cantidad > 0 AND fecha_vencimiento >= ?"
+        sql += " AND cantidad > 0 AND precio_mayorista > 0 AND fecha_vencimiento >= ?"
         params.append(hoy().isoformat())
     sql += " ORDER BY fecha_vencimiento, nombre"
     with conexion() as con:
@@ -678,7 +727,7 @@ def listar_tiendas():
 def catalogo_tienda(tienda_id):
     with conexion() as con:
         return [dict(r) for r in con.execute(
-            "SELECT * FROM inventario_tienda WHERE usuario_id = ? AND cantidad > 0 AND fecha_vencimiento >= ?"
+            "SELECT * FROM inventario_tienda WHERE usuario_id = ? AND cantidad > 0 AND precio_venta > 0 AND fecha_vencimiento >= ?"
             " ORDER BY nombre_producto", (tienda_id, hoy().isoformat()))]
 
 
@@ -726,6 +775,8 @@ def crear_pedido(usuario, items, nota="", tienda_id=None):
                     pub = precio
             if not p:
                 raise ErrorNegocio("Un producto del pedido ya no está disponible.")
+            if precio <= 0:
+                raise ErrorNegocio(f"«{nombre}» no tiene precio definido todavía.")
             if _vencido(p["fecha_vencimiento"]):
                 raise ErrorNegocio(f"«{nombre}» (lote {p['lote']}) está vencido.")
             if cant > p["cantidad"]:
@@ -927,6 +978,7 @@ def reporte_pedidos_por_estado():
 
 
 def reporte_movimientos(limite=300):
+    sincronizar_movimientos()
     with conexion() as con:
         return [dict(r) for r in con.execute(
             "SELECT fecha, producto, lote, tipo, cantidad, detalle, usuario FROM movimientos"
