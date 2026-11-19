@@ -1,11 +1,9 @@
-"""Capa de datos y reglas de negocio del Sistema de Inventario Mayorista (versión 3).
+"""Capa de datos y reglas de negocio del Sistema de Inventario Mayorista
 
 Cadena de venta:  MAYORISTA (vendedor) ──► TENDERO ──► COMPRADOR
-  · El tendero compra al mayorista y tiene su propio inventario (con lotes y vencimientos).
-  · El comprador SOLO compra a un tendero, nunca al mayorista.
-  · Vendedor y tendero tienen ganancias; ambos pueden perder por productos vencidos.
-
-Esta capa NO usa Tkinter: toda la lógica vive aquí para poder probarla de forma automática.
+  · El tendero compra al mayorista y tiene su propio inventario (con lotes y vencimientos)
+  · El comprador SOLO compra a un tendero, nunca al mayorista
+  · Vendedor y tendero tienen ganancias; ambos pueden perder por productos vencidos
 """
 import csv
 import glob
